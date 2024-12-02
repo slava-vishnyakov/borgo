@@ -157,18 +157,87 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Install Apple Certificate (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
+        run: |
+          # Create keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          # Import certificate
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+      - name: Sign and Notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          # Sign the binary
+          codesign --force --options runtime --sign "Developer ID Application: $APPLE_TEAM_ID" --timestamp "${{ matrix.binary_name }}"
+
+          # Create ZIP for notarization
+          ditto -c -k --keepParent "${{ matrix.binary_name }}" "${{ matrix.binary_name }}.zip"
+
+          # Submit for notarization and store submission ID
+          SUBMISSION_ID=$(xcrun notarytool submit "${{ matrix.binary_name }}.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --output-format json | jq -r '.id')
+
+          echo "Notarization submission ID: $SUBMISSION_ID"
+
+          # Wait for notarization to complete
+          while true; do
+            STATUS=$(xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --output-format json | jq -r '.status')
+            
+            echo "Notarization status: $STATUS"
+            
+            if [ "$STATUS" = "Accepted" ]; then
+              break
+            elif [ "$STATUS" = "Invalid" ] || [ "$STATUS" = "Rejected" ]; then
+              echo "Notarization failed"
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID"
+              exit 1
+            fi
+            
+            echo "Waiting for notarization to complete..."
+            sleep 30
+          done
+
+          # Staple the notarization ticket to the binary
+          xcrun stapler staple "${{ matrix.binary_name }}"
+
+          # Create final zip with notarized binary
+          ditto -c -k --keepParent "${{ matrix.binary_name }}" "${{ matrix.binary_name }}.zip"
+
       - name: Prepare binary (Unix)
         if: runner.os != 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/${{ matrix.src_name }} ${{ matrix.binary_name }}
           chmod +x ${{ matrix.binary_name }}
-          gzip -c ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.gz
 
       - name: Prepare binary (Windows)
         if: runner.os == 'Windows'
         run: |
           copy target\${{ matrix.target }}\release\${{ matrix.src_name }} ${{ matrix.binary_name }}
-          7z a ${{ matrix.binary_name }}.zip ${{ matrix.binary_name }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

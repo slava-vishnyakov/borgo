@@ -1,4 +1,4 @@
-name: Version Bump
+name: Version Bump and Release
 
 on:
   workflow_dispatch:
@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      new_version: ${{ steps.new_version.outputs.new_version }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -75,4 +77,77 @@ jobs:
       - name: Print Summary
         run: |
           echo "Previous version: ${{ steps.get_latest_tag.outputs.latest_tag }}"
-          echo "New version: ${{ steps.new_version.outputs.new_version }}" 
+          echo "New version: ${{ steps.new_version.outputs.new_version }}"
+
+  create-release:
+    needs: bump-version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary_name: borgo-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: borgo-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: borgo-windows-x86_64.exe
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ needs.bump-version.outputs.new_version }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Set up Rust cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: borgo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Add Rust target
+        run: |
+          nix develop --command \
+            rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: |
+          nix develop --command \
+            cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/borgo ${{ matrix.binary_name }}
+          chmod +x ${{ matrix.binary_name }}
+          gzip -c ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.gz
+
+      - name: Prepare binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          copy target\${{ matrix.target }}\release\borgo.exe ${{ matrix.binary_name }}
+          7z a ${{ matrix.binary_name }}.zip ${{ matrix.binary_name }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.bump-version.outputs.new_version }}
+          name: Release ${{ needs.bump-version.outputs.new_version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            ${{ matrix.binary_name }}* 

@@ -87,15 +87,15 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary_name: borgo-linux-x86_64
-            src_name: borgo
+            src_name: compiler
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: borgo-macos-x86_64
-            src_name: borgo
+            src_name: compiler
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: borgo-windows-x86_64.exe
-            src_name: wasm.exe
+            src_name: compiler.exe
 
     runs-on: ${{ matrix.os }}
     permissions:
